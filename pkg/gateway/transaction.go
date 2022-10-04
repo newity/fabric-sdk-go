@@ -25,13 +25,12 @@ import (
 // Instances of this class are stateful. A new instance <strong>must</strong>
 // be created for each transaction invocation.
 type Transaction struct {
-	contract        *Contract
-	request         *channel.Request
-	endorsingPeers  []string
-	collections     []string
-	eventch         chan *fab.TxStatusEvent
-	reqOptsEvaluate []channel.RequestOption
-	reqOptsSubmit   []channel.RequestOption
+	contract       *Contract
+	request        *channel.Request
+	endorsingPeers []string
+	collections    []string
+	isInit         bool
+	eventch        chan *fab.TxStatusEvent
 }
 
 // TransactionOption functional arguments can be supplied when creating a transaction object
@@ -85,20 +84,11 @@ func WithCollections(collections ...string) TransactionOption {
 	}
 }
 
-// WithEvaluateRequestOptions is an optional argument to the CreateTransaction method which
-// sets RequestOptions on SDK request Query calls such as attempts count and so on
-func WithEvaluateRequestOptions(opts ...channel.RequestOption) TransactionOption {
+// WithInit is an option that makes the transaction fulfill the --init-required condition before the chaincode
+// can be invoked to process regular transactions
+func WithInit() TransactionOption {
 	return func(txn *Transaction) error {
-		txn.reqOptsEvaluate = opts
-		return nil
-	}
-}
-
-// WithSubmitRequestOptions is an optional argument to the CreateTransaction method which
-// sets RequestOptions on SDK request Execute calls such as attempts count and so on
-func WithSubmitRequestOptions(opts ...channel.RequestOption) TransactionOption {
-	return func(txn *Transaction) error {
-		txn.reqOptsSubmit = opts
+		txn.isInit = true
 		return nil
 	}
 }
@@ -148,6 +138,7 @@ func (txn *Transaction) Submit(args ...string) ([]byte, error) {
 		bytes[i] = []byte(v)
 	}
 	txn.request.Args = bytes
+	txn.request.IsInit = txn.isInit
 
 	var options []channel.RequestOption
 	if txn.endorsingPeers != nil {
@@ -215,16 +206,17 @@ func (c *commitTxHandler) Handle(requestContext *invoke.RequestContext, clientCo
 
 	select {
 	case txStatus := <-statusNotifier:
-		if c.eventch != nil {
-			c.eventch <- txStatus
-			close(c.eventch)
-		}
 		requestContext.Response.TxValidationCode = txStatus.TxValidationCode
 
 		if txStatus.TxValidationCode != peer.TxValidationCode_VALID {
 			requestContext.Error = status.New(status.EventServerStatus, int32(txStatus.TxValidationCode),
 				"received invalid transaction", nil)
 			return
+		}
+
+		if c.eventch != nil {
+			c.eventch <- txStatus
+			close(c.eventch)
 		}
 	case <-requestContext.Ctx.Done():
 		requestContext.Error = status.New(status.ClientStatus, status.Timeout.ToInt32(),
